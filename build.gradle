@@ -57,13 +57,18 @@ test {
     useJUnitPlatform()
 }
 
+def dockerImage = "${dockerPrefix}/${rootProject.name}"
+
 tasks.register("buildDockerImage", Exec) {
     dependsOn bootJar
     workingDir projectDir
-    commandLine 'docker', 'build', '-t', "${dockerPrefix}/${rootProject.name}:latest", '.'
+    commandLine 'docker', 'build', '-t', dockerImage, '.'
 }
 
 tasks.register("pushDockerImage", Exec) {
     dependsOn buildDockerImage
-    commandLine 'docker', 'push', "${dockerPrefix}/${rootProject.name}:latest"
+    commandLine 'docker', 'push', dockerImage
+    doLast {
+        println "Pushed Docker image $dockerImage"
+    }
 }
