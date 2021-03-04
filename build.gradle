@@ -2,7 +2,7 @@ plugins {
     id 'org.springframework.boot' version '2.4.3'
     id 'io.spring.dependency-management' version '1.0.11.RELEASE'
     id 'java'
-//	id 'maven'
+    id 'maven'
 }
 
 group = 'io.kettil'
@@ -57,14 +57,13 @@ test {
     useJUnitPlatform()
 }
 
-task buildDockerImage(type: Exec) {
+tasks.register("buildDockerImage", Exec) {
     dependsOn bootJar
     workingDir projectDir
     commandLine 'docker', 'build', '-t', "${dockerPrefix}/${rootProject.name}:latest", '.'
 }
 
-task pushDockerImage(type: Exec) {
+tasks.register("pushDockerImage", Exec) {
     dependsOn buildDockerImage
     commandLine 'docker', 'push', "${dockerPrefix}/${rootProject.name}:latest"
 }
-
