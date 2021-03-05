@@ -108,8 +108,8 @@ public class InvokerService {
                             .contentType(MediaType.APPLICATION_JSON)
                             .bodyValue(ErrorResponse.newErrorResponse(
                                 HttpStatus.INTERNAL_SERVER_ERROR,
-                                String.format("Error for input '%s': %s",
-                                    input, e.getMessage()),
+                                String.format("Function '%s' error for input '%s': %s: %s",
+                                    functionName, input, e.getMessage(), e),
                                 request.path()));
                     }
                 });
