@@ -47,7 +47,7 @@ public class EnvoyControlPlane implements Closeable {
     private Server server;
 
     public EnvoyControlPlane(
-        @org.springframework.beans.factory.annotation.Value("${xds.port:18000}") int port,
+        @org.springframework.beans.factory.annotation.Value("${xds.port:9000}") int port,
         Manifest manifest) {
         this.port = port;
         this.manifest = manifest;
@@ -98,7 +98,14 @@ public class EnvoyControlPlane implements Closeable {
 
         for (Map.Entry<String, Manifest.PathManifest> i : manifest.getPaths().entrySet()) {
             LinkedHashMap<String, String> materializedExtensions = new LinkedHashMap<>(manifest.getAuthorization().getExtensions());
+
+            materializedExtensions.put("service_path", i.getKey());
+            String objectIdPtr = i.getValue().getAuthorization().getObjectIdPtr();
+            if (objectIdPtr != null)
+                materializedExtensions.put("objectid_ptr", objectIdPtr);
+
             materializedExtensions.putAll(i.getValue().getAuthorization().getExtensions());
+
             routes.add(getRoute(i.getKey(), "invoker", materializedExtensions));
         }
 
@@ -113,6 +120,8 @@ public class EnvoyControlPlane implements Closeable {
                 ImmutableList.of(),
                 ImmutableList.of(),
                 "1"));
+
+        log.info(cache.toString());
 
         V3DiscoveryServer v3DiscoveryServer = new V3DiscoveryServer(cache);
 
