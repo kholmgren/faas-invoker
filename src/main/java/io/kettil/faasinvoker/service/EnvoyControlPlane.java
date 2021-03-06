@@ -8,7 +8,12 @@ import io.envoyproxy.controlplane.cache.v3.SimpleCache;
 import io.envoyproxy.controlplane.cache.v3.Snapshot;
 import io.envoyproxy.controlplane.server.V3DiscoveryServer;
 import io.envoyproxy.envoy.config.cluster.v3.Cluster;
-import io.envoyproxy.envoy.config.core.v3.*;
+import io.envoyproxy.envoy.config.core.v3.Address;
+import io.envoyproxy.envoy.config.core.v3.ApiVersion;
+import io.envoyproxy.envoy.config.core.v3.GrpcService;
+import io.envoyproxy.envoy.config.core.v3.Http2ProtocolOptions;
+import io.envoyproxy.envoy.config.core.v3.Node;
+import io.envoyproxy.envoy.config.core.v3.SocketAddress;
 import io.envoyproxy.envoy.config.endpoint.v3.ClusterLoadAssignment;
 import io.envoyproxy.envoy.config.endpoint.v3.Endpoint;
 import io.envoyproxy.envoy.config.endpoint.v3.LbEndpoint;
@@ -16,7 +21,11 @@ import io.envoyproxy.envoy.config.endpoint.v3.LocalityLbEndpoints;
 import io.envoyproxy.envoy.config.listener.v3.Filter;
 import io.envoyproxy.envoy.config.listener.v3.FilterChain;
 import io.envoyproxy.envoy.config.listener.v3.Listener;
-import io.envoyproxy.envoy.config.route.v3.*;
+import io.envoyproxy.envoy.config.route.v3.Route;
+import io.envoyproxy.envoy.config.route.v3.RouteAction;
+import io.envoyproxy.envoy.config.route.v3.RouteConfiguration;
+import io.envoyproxy.envoy.config.route.v3.RouteMatch;
+import io.envoyproxy.envoy.config.route.v3.VirtualHost;
 import io.envoyproxy.envoy.extensions.filters.http.ext_authz.v3.BufferSettings;
 import io.envoyproxy.envoy.extensions.filters.http.ext_authz.v3.CheckSettings;
 import io.envoyproxy.envoy.extensions.filters.http.ext_authz.v3.ExtAuthz;
@@ -33,7 +42,13 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import java.io.Closeable;
 import java.io.IOException;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 @Slf4j
 @Service
@@ -42,38 +57,40 @@ public class EnvoyControlPlane implements Closeable {
 
     private final int port;
     private final Manifest manifest;
+    private final SimpleCache<String> cache = new SimpleCache<>(new NodeGroup<>() {
+        @Override
+        public String hash(io.envoyproxy.envoy.api.v2.core.Node node) {
+            return GROUP;
+        }
 
-    private SimpleCache<String> cache;
+        @Override
+        public String hash(Node node) {
+            return GROUP;
+        }
+    });
+
     private Server server;
 
     public EnvoyControlPlane(
-        @org.springframework.beans.factory.annotation.Value("${xds.port:9000}") int port,
+        @org.springframework.beans.factory.annotation.Value("${envoy.xds.port}") int port,
         Manifest manifest) {
+
         this.port = port;
         this.manifest = manifest;
+    }
 
-        this.cache = new SimpleCache<>(new NodeGroup<String>() {
-            @Override
-            public String hash(io.envoyproxy.envoy.api.v2.core.Node node) {
-                return GROUP;
-            }
-
-            @Override
-            public String hash(Node node) {
-                return GROUP;
-            }
-        });
+    @Override
+    public void close() throws IOException {
+        if (server != null)
+            server.shutdown();
     }
 
     @PostConstruct
     public void start() throws IOException {
-//        Admin admin = getAdmin();
-//        LayeredRuntime layeredRuntime = getLayeredRuntime();
-
-        List<Cluster> clusters = Arrays.asList(
-            getCluster("invoker", "invoker", 8080),
-            getCluster("acl_api", "authz", 8081),
-            getCluster("authz", "authz", 8080)
+        var clusters = Arrays.asList(
+            makeCluster("invoker", "invoker", 8080),
+            makeCluster("acl_api", "authz", 8081),
+            makeCluster("authz", "authz", 8080)
                 .toBuilder()
                 .putTypedExtensionProtocolOptions(
                     "envoy.extensions.upstreams.http.v3.HttpProtocolOptions",
@@ -87,9 +104,8 @@ public class EnvoyControlPlane implements Closeable {
                         .build())
                 .build());
 
-        List<Route> routes = new ArrayList<>();
-
-        routes.add(getRoute(false, "/acl/", "acl_api", new HashMap<>() {{
+        var routes = new ArrayList<Route>();
+        routes.add(makeRoute(false, "/acl/", "acl_api", new HashMap<>() {{
             put("namespace_object", "acl");
             put("namespace_service", "api");
             put("service_path", "/acl/{objectId}");
@@ -106,24 +122,19 @@ public class EnvoyControlPlane implements Closeable {
 
             materializedExtensions.putAll(i.getValue().getAuthorization().getExtensions());
 
-            routes.add(getRoute(i.getKey(), "invoker", materializedExtensions));
+            routes.add(makeRoute(i.getKey(), "invoker", materializedExtensions));
         }
 
-        List<Listener> listeners = getListeners(routes);
+        var listener = makeListener(routes);
+        var snapshot = makeSnapshot(clusters, Collections.singletonList(listener));
 
         cache.setSnapshot(
             GROUP,
-            Snapshot.create(
-                clusters,
-                ImmutableList.of(),
-                listeners,
-                ImmutableList.of(),
-                ImmutableList.of(),
-                "1"));
+            snapshot);
 
         log.info(cache.toString());
 
-        V3DiscoveryServer v3DiscoveryServer = new V3DiscoveryServer(cache);
+        var v3DiscoveryServer = new V3DiscoveryServer(cache);
 
         server = NettyServerBuilder.forPort(port)
             .addService(v3DiscoveryServer.getAggregatedDiscoveryServiceImpl())
@@ -137,8 +148,18 @@ public class EnvoyControlPlane implements Closeable {
         log.info("Envoy control plane server started on port {}", server.getPort());
     }
 
-    private List<Listener> getListeners(List<Route> routes) {
-        return Arrays.asList(Listener.newBuilder()
+    private Snapshot makeSnapshot(List<Cluster> clusters, List<Listener> listeners) {
+        return Snapshot.create(
+            clusters,
+            ImmutableList.of(),
+            listeners,
+            ImmutableList.of(),
+            ImmutableList.of(),
+            "1");
+    }
+
+    private Listener makeListener(List<Route> routes) {
+        return Listener.newBuilder()
             .setAddress(Address.newBuilder()
                 .setSocketAddress(SocketAddress.newBuilder()
                     .setAddress("0.0.0.0")
@@ -191,14 +212,14 @@ public class EnvoyControlPlane implements Closeable {
                         .build())
                     .build())
                 .build())
-            .build());
+            .build();
     }
 
-    private Route getRoute(String path, String cluster, Map<String, String> contextExtensions) {
-        return getRoute(true, path, cluster, contextExtensions);
+    private Route makeRoute(String path, String cluster, Map<String, String> contextExtensions) {
+        return makeRoute(true, path, cluster, contextExtensions);
     }
 
-    private Route getRoute(boolean exactMatch, String path, String cluster, Map<String, String> contextExtensions) {
+    private Route makeRoute(boolean exactMatch, String path, String cluster, Map<String, String> contextExtensions) {
         return Route.newBuilder()
             .setMatch(exactMatch
                 ? RouteMatch.newBuilder().setPath(path).build()
@@ -217,7 +238,7 @@ public class EnvoyControlPlane implements Closeable {
             .build();
     }
 
-    private Cluster getCluster(String name, String host, int port) {
+    private Cluster makeCluster(String name, String host, int port) {
         return Cluster.newBuilder()
             .setName(name)
             .setConnectTimeout(Duration.newBuilder().setSeconds(1))
@@ -239,52 +260,5 @@ public class EnvoyControlPlane implements Closeable {
                     .build())
                 .build())
             .build();
-    }
-
-//    private LayeredRuntime getLayeredRuntime() {
-//        return LayeredRuntime.newBuilder()
-//            .addLayers(RuntimeLayer.newBuilder()
-//                .setName("static_layer_0")
-//                .setStaticLayer(Struct.newBuilder()
-//                    .putFields("envoy", Value.newBuilder()
-//                        .setStructValue(Struct.newBuilder()
-//                            .putFields("resource_limits", Value.newBuilder()
-//                                .setStructValue(Struct.newBuilder()
-//                                    .putFields("listener", Value.newBuilder()
-//                                        .setStructValue(Struct.newBuilder()
-//                                            .putFields("example_listener_name", Value.newBuilder()
-//                                                .setStructValue(Struct.newBuilder()
-//                                                    .putFields("connection_limit", Value.newBuilder()
-//                                                        .setNumberValue(10000)
-//                                                        .build())
-//                                                    .build())
-//                                                .build())
-//                                            .build())
-//                                        .build())
-//                                    .build())
-//                                .build())
-//                            .build())
-//                        .build())
-//                    .build())
-//                .build())
-//            .build();
-//    }
-
-//    private Admin getAdmin() {
-//        return Admin.newBuilder()
-//            .setAccessLogPath("/dev/null")
-//            .setAddress(Address.newBuilder()
-//                .setSocketAddress(SocketAddress.newBuilder()
-//                    .setAddress("0.0.0.0")
-//                    .setPortValue(8001)
-//                    .build())
-//                .build())
-//            .build();
-//}
-
-    @Override
-    public void close() throws IOException {
-        if (server != null)
-            server.shutdown();
     }
 }
